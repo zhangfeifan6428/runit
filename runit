@@ -1,0 +1,186 @@
+#!/bin/bash
+
+
+number="1"
+COLOR_ARRAY=('32' '33' '34' '35' '36')
+
+function usage() {
+    echo "Usage: runit [-c] [-f procfile|Procfile] [-e envfile|.env]
+             -c: check procfile and envfile
+             -f: load the procfile
+             -e: load the envfile
+             -h: help information
+             "
+}
+
+# function verify
+# to verify envfile and procfile
+# return:
+# 0 for succeed
+# 1 for failed
+function verify() {
+    local input_file="$1"
+    local flag="$2"
+    local ret_val=0
+
+    [[ ! -f "${input_file}" ]] && my_err "verify inputfile not exists" && return 1
+    
+    if ${flag}; then
+        while read nextline; do
+            if echo "${nextline}" | grep -v "="; then
+                my_err "no_equal_mark"
+                continue
+            fi
+            key="${nextline%%=*}"
+            value="${nextline#*=}"
+            echo "${key}" | grep -q "[^a-zA-Z_]" && my_err "invalid_char" && ret_val=1
+            echo "${value}" | grep -qE "[[:space:]]" && my_err "value_have_space" && ret_val=1
+        done < <(grep -vE "^[[:space:]]*#" "${input_file}" | grep -v "^$")
+    else
+        while read nextline ; do
+            if echo "${nextline}" | grep -v ":"; then
+                my_err "no_colon_command"
+                continue
+            fi
+            key="${nextline%%:*}"
+            value="${nextline#*:}"
+            echo "${key}" | grep -q [^a-zA-Z_] && my_err "invalid_char" && ret_val=1
+        done < <(grep -vE "^[[:space:]]*#" "${input_file}")
+    fi
+    return ${ret_val}
+
+}
+
+# function my_err
+# to print error informations
+function my_err() {
+    echo "$1"
+}
+
+# function log
+# output log to screen
+# return:
+# 0 for succeed
+# 1 for failed
+function log() {
+    local pid_name="$1"
+    local pid_command="$2"
+    local color="$3"
+
+    cur_time=$(date +%H:%M:%S)
+    printf "\E[${color}m${cur_time} %-6s | " "${pid_name}"
+
+    tput sgr0
+    echo "  ${pid_command}"
+    return 0
+}
+
+# function run_command
+# run command
+# return:
+# 0 for succeed
+# 1 for failed
+function run_command() {
+    local proc_name="$1"
+    local command="$2"
+    local cur_pid=$!
+    local cur_color="${COLOR_ARRAY[$number]}"
+    local comm_port=$(echo "${command}" | grep -e "\$PORT")
+
+    [[ -n "${comm_port}" ]] && [[ -z "${PORT}" ]] && PORT=8080
+    #cmd=${command}"  &>${proc_name""}.log &" #
+    #eval ${cmd} #
+    bash -c "${command}" > >(
+        while read result; do
+            log "${proc_name}" "${result}" "${cur_color}"
+        done
+    ) 2>&1 &
+
+    local output="$(eval echo \"${command}\")"
+    log "${proc_name}" "${output} start with pid ${cur_pid}" "${cur_color}"
+    [[ $? -ne 0 ]] && return 1
+
+    [[ -n "${comm_port}" ]] && PORT=$((${PORT} + 1))
+
+    (( number ++ ))
+
+    return 0
+}
+
+# function load_env_file
+# load envfile
+# return:
+# 0 for succeed
+# 1 for failed
+
+function load_env_file() {
+    set -a
+    local env_lists="$1"
+    for flag in $(echo "${env_lists}"); do
+        [[ -f "${flag}" ]] && source "${flag}"
+    done
+    return 0
+}
+
+# function run_procfile
+# run procfile
+# return:
+# 0 for succeed
+# 1 for failed
+
+function run_procfile() {
+    local proc_file="$1"
+    [[ ! -f "${proc_file}" ]] && my_err "this procfile is not exists" && return 1
+    while read nextline; do
+        if echo "${nextline}" | grep -qv ":"; then
+            my_err "no_colon_command"
+            continue
+        fi
+        local key="${nextline%%:*}"
+        local value="${nextline#*:}"
+        [[ -n "${key}" ]] && [[ -n "${value}" ]] && run_command "${key}" "${value}"
+        [[ $? -ne 0 ]] && return 1
+    done < <(grep "" "${proc_file}" | grep -vE "[[:space:]]*#" | grep -v "^$" )
+    #trap "(kill -9 `jobs -p|xargs`; &>/dev/null)" SIGINT SIGTERM
+    wait
+    return 0
+}
+
+function main() {
+    local check=false
+    while getopts "f:e:ch" flag
+    do
+        case ${flag} in
+            c) check=true ;;
+            f) procfile="${OPTARG}" ;;
+            e) envfile="${OPTARG}" ;;
+            *) usage ;;
+        esac
+    done
+    if ${check}; then
+        if [[ -n "${procfile}" ]]; then
+	    verify "${procfile}" false
+            PROC_RET_VALUE=$?
+            [[ ${PROC_RET_VALUE} -ne 0 ]] && exit 1
+        else
+            my_err "The procfile is null"
+            exit 1
+        fi
+	envfile=${envfile:-"./.env"}
+	verify "${envfile}" true
+        ENV_RET_VALUE=$?
+        [[ ${ENV_RET_VALUE} -ne 0 ]] && exit 1
+    else
+	envfile=${envfile:-"./.env"}
+        load_env_file "${envfile}"
+        LOAD_ENV_RET_VALUE=$?
+        [[ ${LOAD_ENV_RET_VALUE} -ne 0 ]] && exit 1
+ 	procfile=${procfile:-"./Procfile"}
+        run_procfile "${procfile}"
+        RUN_RET_VALUE=$?
+        [[ RUN_RET_VALUE -ne 0 ]] && exit 1
+    fi
+    exit 0
+} 
+
+main "$@"
